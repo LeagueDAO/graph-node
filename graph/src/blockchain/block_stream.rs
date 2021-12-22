@@ -1,15 +1,89 @@
 use anyhow::Error;
+use async_stream::stream;
 use futures03::Stream;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use super::{Block, BlockPtr, Blockchain};
 use crate::components::store::BlockNumber;
 use crate::firehose;
 use crate::{prelude::*, prometheus::labels};
 
-pub trait BlockStream<C: Blockchain>:
-    Stream<Item = Result<BlockStreamEvent<C>, Error>> + Unpin
+pub struct BufferedBlockStream<C: Send> {
+    inner: Pin<Box<dyn Stream<Item = Result<BlockStreamEvent<C>, Error>> + Send>>,
+}
+
+impl<C: Send + 'static> BufferedBlockStream<C> {
+    pub fn spawn_from_stream(
+        stream: Box<dyn BlockStream<C>>,
+        size_hint: usize,
+    ) -> Box<dyn BlockStream<C>> {
+        let (sender, receiver) = mpsc::channel::<Result<BlockStreamEvent<C>, Error>>(size_hint);
+        crate::spawn(async move { BufferedBlockStream::stream_blocks(stream, sender).await });
+
+        Box::new(BufferedBlockStream::new(receiver))
+    }
+
+    pub fn new(mut receiver: Receiver<Result<BlockStreamEvent<C>, Error>>) -> Self {
+        let inner = stream! {
+            loop {
+                let event = match receiver.recv().await {
+                    Some(evt) => evt,
+                    None => return,
+                };
+
+                yield event
+            }
+        };
+
+        Self {
+            inner: Box::pin(inner),
+        }
+    }
+
+    pub async fn stream_blocks(
+        mut stream: Box<dyn BlockStream<C>>,
+        sender: Sender<Result<BlockStreamEvent<C>, Error>>,
+    ) -> Result<(), Error> {
+        loop {
+            let event = match stream.next().await {
+                Some(evt) => evt,
+                None => {
+                    break;
+                }
+            };
+
+            match sender.send(event).await {
+                Ok(_) => continue,
+                Err(err) => {
+                    return Err(anyhow!(
+                        "buffered blockstream channel is closed, stopping. Err: {}",
+                        err
+                    ))
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl<C: Send> BlockStream<C> for BufferedBlockStream<C> {}
+
+impl<C: Send> Stream for BufferedBlockStream<C> {
+    type Item = Result<BlockStreamEvent<C>, Error>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.poll_next_unpin(cx)
+    }
+}
+
+pub trait BlockStream<C: Send>:
+    Stream<Item = Result<BlockStreamEvent<C>, Error>> + Unpin + Send
 {
 }
 
@@ -85,7 +159,7 @@ pub trait FirehoseMapper<C: Blockchain>: Send + Sync {
         response: &firehose::Response,
         adapter: &C::TriggersAdapter,
         filter: &C::TriggerFilter,
-    ) -> Result<BlockStreamEvent<C>, FirehoseError>;
+    ) -> Result<BlockStreamEvent<BlockWithTriggers<C>>, FirehoseError>;
 }
 
 #[derive(Error, Debug)]
@@ -99,13 +173,13 @@ pub enum FirehoseError {
     UnknownError(#[from] anyhow::Error),
 }
 
-pub enum BlockStreamEvent<C: Blockchain> {
+pub enum BlockStreamEvent<C: Send> {
     // The payload is the current subgraph head pointer, which should be reverted, such that the
     // parent of the current subgraph head becomes the new subgraph head.
     // An optional pointer to the parent block will save a round trip operation when reverting.
     Revert(BlockPtr, FirehoseCursor, Option<BlockPtr>),
 
-    ProcessBlock(BlockWithTriggers<C>, FirehoseCursor),
+    ProcessBlock(C, FirehoseCursor),
 }
 
 #[derive(Clone)]
@@ -168,4 +242,87 @@ pub type ChainHeadUpdateStream = Box<dyn Stream<Item = ()> + Send + Unpin>;
 pub trait ChainHeadUpdateListener: Send + Sync + 'static {
     /// Subscribe to chain head updates for the given network.
     fn subscribe(&self, network: String, logger: Logger) -> ChainHeadUpdateStream;
+}
+
+#[cfg(test)]
+mod test {
+    use std::{collections::HashSet, task::Poll};
+
+    use anyhow::Error;
+    use futures03::{Stream, StreamExt, TryStreamExt};
+
+    use crate::ext::futures::{CancelableError, SharedCancelGuard, StreamExtension};
+
+    use super::{BlockStream, BlockStreamEvent, BufferedBlockStream};
+
+    #[derive(Clone, Eq, PartialEq, Hash)]
+    struct Block {
+        number: u64,
+    }
+
+    struct TestStream {
+        number: u64,
+    }
+
+    impl BlockStream<Block> for TestStream {}
+
+    impl Stream for TestStream {
+        type Item = Result<BlockStreamEvent<Block>, Error>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            self.number += 1;
+            Poll::Ready(Some(Ok(BlockStreamEvent::ProcessBlock(
+                Block {
+                    number: self.number - 1,
+                },
+                None,
+            ))))
+        }
+    }
+
+    #[tokio::test]
+    async fn consume_stream() {
+        let initial_block = 100;
+        let buffer_size = 5;
+
+        let stream = Box::new(TestStream {
+            number: initial_block,
+        });
+        let guard = SharedCancelGuard::new();
+
+        let mut stream = BufferedBlockStream::spawn_from_stream(stream, buffer_size)
+            .map_err(CancelableError::Error)
+            .cancelable(&guard, || Err(CancelableError::Cancel));
+
+        let mut blocks = HashSet::<Block>::new();
+        let mut count = 0;
+        loop {
+            match stream.next().await {
+                None if blocks.len() == 0 => panic!("None before blocks"),
+                Some(Err(CancelableError::Cancel)) => {
+                    assert!(guard.is_canceled(), "Guard shouldn't be called yet");
+
+                    break;
+                }
+                Some(Ok(BlockStreamEvent::ProcessBlock(block, _))) => {
+                    blocks.insert(block.clone());
+                    count += 1;
+
+                    if block.number > initial_block + buffer_size as u64 {
+                        guard.cancel();
+                    }
+                }
+                _ => panic!("Should not happen"),
+            };
+        }
+        assert!(
+            blocks.len() > buffer_size,
+            "should consume at least a full buffer, consumed {}",
+            count
+        );
+        assert_eq!(count, blocks.len(), "should not have duplicated blocks");
+    }
 }

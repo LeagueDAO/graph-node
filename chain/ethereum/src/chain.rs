@@ -196,7 +196,7 @@ impl Blockchain for Chain {
         filter: Arc<Self::TriggerFilter>,
         metrics: Arc<BlockStreamMetrics>,
         unified_api_version: UnifiedMappingApiVersion,
-    ) -> Result<Box<dyn BlockStream<Self>>, Error> {
+    ) -> Result<Box<dyn BlockStream<BlockWithTriggers<Self>>>, Error> {
         let requirements = filter.node_capabilities();
         let adapter = self
             .triggers_adapter(
@@ -241,7 +241,7 @@ impl Blockchain for Chain {
         filter: Arc<Self::TriggerFilter>,
         metrics: Arc<BlockStreamMetrics>,
         unified_api_version: UnifiedMappingApiVersion,
-    ) -> Result<Box<dyn BlockStream<Self>>, Error> {
+    ) -> Result<Box<dyn BlockStream<BlockWithTriggers<Self>>>, Error> {
         let requirements = filter.node_capabilities();
         let adapter = self
             .triggers_adapter(
@@ -565,10 +565,8 @@ impl FirehoseMapperTrait<Chain> for FirehoseMapper {
         response: &firehose::Response,
         adapter: &TriggersAdapter,
         filter: &TriggerFilter,
-    ) -> Result<BlockStreamEvent<Chain>, FirehoseError> {
-        use firehose::ForkStep;
-
-        let step = ForkStep::from_i32(response.step).unwrap_or_else(|| {
+    ) -> Result<BlockStreamEvent<BlockWithTriggers<Chain>>, FirehoseError> {
+        let step = firehose::ForkStep::from_i32(response.step).unwrap_or_else(|| {
             panic!(
                 "unknown step i32 value {}, maybe you forgot update & re-regenerate the protobuf definitions?",
                 response.step

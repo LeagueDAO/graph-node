@@ -7,12 +7,13 @@ use std::time::Duration;
 use crate::prelude::*;
 use crate::util::backoff::ExponentialBackoff;
 
-use super::block_stream::{BlockStream, BlockStreamEvent, FirehoseMapper};
+use super::block_stream::{BlockStream, BlockStreamEvent, BlockWithTriggers, FirehoseMapper};
 use super::Blockchain;
 use crate::{firehose, firehose::FirehoseEndpoint};
 
 pub struct FirehoseBlockStream<C: Blockchain> {
-    stream: Pin<Box<dyn Stream<Item = Result<BlockStreamEvent<C>, Error>>>>,
+    stream:
+        Pin<Box<dyn Stream<Item = Result<BlockStreamEvent<BlockWithTriggers<C>>, Error>> + Send>>,
 }
 
 impl<C> FirehoseBlockStream<C>
@@ -60,7 +61,7 @@ fn stream_blocks<C: Blockchain, F: FirehoseMapper<C>>(
     filter: Arc<C::TriggerFilter>,
     start_block_num: BlockNumber,
     logger: Logger,
-) -> impl Stream<Item = Result<BlockStreamEvent<C>, Error>> {
+) -> impl Stream<Item = Result<BlockStreamEvent<BlockWithTriggers<C>>, Error>> {
     use firehose::ForkStep::*;
 
     try_stream! {
@@ -129,11 +130,11 @@ fn stream_blocks<C: Blockchain, F: FirehoseMapper<C>>(
 }
 
 impl<C: Blockchain> Stream for FirehoseBlockStream<C> {
-    type Item = Result<BlockStreamEvent<C>, Error>;
+    type Item = Result<BlockStreamEvent<BlockWithTriggers<C>>, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         return self.stream.poll_next_unpin(cx);
     }
 }
 
-impl<C: Blockchain> BlockStream<C> for FirehoseBlockStream<C> {}
+impl<C: Blockchain> BlockStream<BlockWithTriggers<C>> for FirehoseBlockStream<C> {}
