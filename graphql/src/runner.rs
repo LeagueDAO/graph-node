@@ -22,8 +22,9 @@ use graph::{
     prelude::QueryStore,
 };
 use graphql_tools::validation::rules::{
-    FragmentsOnCompositeTypes, KnownFragmentNamesRule, LeafFieldSelections, LoneAnonymousOperation,
-    NoUnusedFragments, OverlappingFieldsCanBeMerged,
+    FieldsOnCorrectType, FragmentsOnCompositeTypes, KnownFragmentNames, KnownTypeNames,
+    LeafFieldSelections, LoneAnonymousOperation, NoUnusedFragments, OverlappingFieldsCanBeMerged,
+    SingleFieldSubscriptions, UniqueFragmentNames, UniqueOperationNames, VariablesAreInputTypes,
 };
 use graphql_tools::validation::validate::ValidationPlan;
 
@@ -148,12 +149,18 @@ where
         let mut graphql_validation_plan = ValidationPlan { rules: Vec::new() };
 
         if !(*DISABLE_GRAPHQL_VALIDATIONS) {
+            graphql_validation_plan.add_rule(Box::new(UniqueOperationNames {}));
             graphql_validation_plan.add_rule(Box::new(LoneAnonymousOperation {}));
+            graphql_validation_plan.add_rule(Box::new(SingleFieldSubscriptions {}));
+            graphql_validation_plan.add_rule(Box::new(KnownTypeNames {}));
             graphql_validation_plan.add_rule(Box::new(FragmentsOnCompositeTypes {}));
-            graphql_validation_plan.add_rule(Box::new(OverlappingFieldsCanBeMerged {}));
-            graphql_validation_plan.add_rule(Box::new(KnownFragmentNamesRule {}));
-            graphql_validation_plan.add_rule(Box::new(NoUnusedFragments {}));
+            graphql_validation_plan.add_rule(Box::new(VariablesAreInputTypes {}));
             graphql_validation_plan.add_rule(Box::new(LeafFieldSelections {}));
+            graphql_validation_plan.add_rule(Box::new(FieldsOnCorrectType {}));
+            graphql_validation_plan.add_rule(Box::new(UniqueFragmentNames {}));
+            graphql_validation_plan.add_rule(Box::new(KnownFragmentNames {}));
+            graphql_validation_plan.add_rule(Box::new(NoUnusedFragments {}));
+            graphql_validation_plan.add_rule(Box::new(OverlappingFieldsCanBeMerged {}));
         }
 
         GraphQlRunner {
