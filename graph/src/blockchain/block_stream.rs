@@ -10,11 +10,11 @@ use crate::components::store::BlockNumber;
 use crate::firehose;
 use crate::{prelude::*, prometheus::labels};
 
-pub struct BufferedBlockStream<C: Send> {
+pub struct BufferedBlockStream<C: Blockchain> {
     inner: Pin<Box<dyn Stream<Item = Result<BlockStreamEvent<C>, Error>> + Send>>,
 }
 
-impl<C: Send + 'static> BufferedBlockStream<C> {
+impl<C: Blockchain + 'static> BufferedBlockStream<C> {
     pub fn spawn_from_stream(
         stream: Box<dyn BlockStream<C>>,
         size_hint: usize,
@@ -69,9 +69,9 @@ impl<C: Send + 'static> BufferedBlockStream<C> {
     }
 }
 
-impl<C: Send> BlockStream<C> for BufferedBlockStream<C> {}
+impl<C: Blockchain> BlockStream<C> for BufferedBlockStream<C> {}
 
-impl<C: Send> Stream for BufferedBlockStream<C> {
+impl<C: Blockchain> Stream for BufferedBlockStream<C> {
     type Item = Result<BlockStreamEvent<C>, Error>;
 
     fn poll_next(
@@ -82,7 +82,7 @@ impl<C: Send> Stream for BufferedBlockStream<C> {
     }
 }
 
-pub trait BlockStream<C: Send>:
+pub trait BlockStream<C: Blockchain>:
     Stream<Item = Result<BlockStreamEvent<C>, Error>> + Unpin + Send
 {
 }
@@ -159,7 +159,7 @@ pub trait FirehoseMapper<C: Blockchain>: Send + Sync {
         response: &firehose::Response,
         adapter: &C::TriggersAdapter,
         filter: &C::TriggerFilter,
-    ) -> Result<BlockStreamEvent<BlockWithTriggers<C>>, FirehoseError>;
+    ) -> Result<BlockStreamEvent<C>, FirehoseError>;
 }
 
 #[derive(Error, Debug)]
@@ -173,13 +173,13 @@ pub enum FirehoseError {
     UnknownError(#[from] anyhow::Error),
 }
 
-pub enum BlockStreamEvent<C: Send> {
+pub enum BlockStreamEvent<C: Blockchain> {
     // The payload is the current subgraph head pointer, which should be reverted, such that the
     // parent of the current subgraph head becomes the new subgraph head.
     // An optional pointer to the parent block will save a round trip operation when reverting.
     Revert(BlockPtr, FirehoseCursor, Option<BlockPtr>),
 
-    ProcessBlock(C, FirehoseCursor),
+    ProcessBlock(BlockWithTriggers<C>, FirehoseCursor),
 }
 
 #[derive(Clone)]
@@ -251,7 +251,10 @@ mod test {
     use anyhow::Error;
     use futures03::{Stream, StreamExt, TryStreamExt};
 
-    use crate::ext::futures::{CancelableError, SharedCancelGuard, StreamExtension};
+    use crate::{
+        blockchain::{Blockchain, BlockchainKind},
+        ext::futures::{CancelableError, SharedCancelGuard, StreamExtension},
+    };
 
     use super::{BlockStream, BlockStreamEvent, BufferedBlockStream};
 
@@ -260,14 +263,15 @@ mod test {
         number: u64,
     }
 
+    #[derive(Debug)]
     struct TestStream {
         number: u64,
     }
 
-    impl BlockStream<Block> for TestStream {}
+    impl BlockStream<Self> for TestStream {}
 
     impl Stream for TestStream {
-        type Item = Result<BlockStreamEvent<Block>, Error>;
+        type Item = Result<BlockStreamEvent<Self>, Error>;
 
         fn poll_next(
             mut self: std::pin::Pin<&mut Self>,
@@ -324,5 +328,126 @@ mod test {
             count
         );
         assert_eq!(count, blocks.len(), "should not have duplicated blocks");
+    }
+
+    impl Blockchain for TestStream {
+        const KIND: BlockchainKind = BlockchainKind::Ethereum;
+
+        type Block = Block;
+
+        type DataSource;
+
+        type UnresolvedDataSource;
+
+        type DataSourceTemplate;
+
+        type UnresolvedDataSourceTemplate;
+
+        type TriggersAdapter;
+
+        type TriggerData;
+
+        type MappingTrigger;
+
+        type TriggerFilter;
+
+        type NodeCapabilities;
+
+        type IngestorAdapter;
+
+        type RuntimeAdapter;
+
+        fn triggers_adapter(
+            &self,
+            loc: &crate::components::store::DeploymentLocator,
+            capabilities: &Self::NodeCapabilities,
+            unified_api_version: crate::data::subgraph::UnifiedMappingApiVersion,
+            stopwatch_metrics: crate::components::metrics::stopwatch::StopwatchMetrics,
+        ) -> Result<std::sync::Arc<Self::TriggersAdapter>, Error> {
+            todo!()
+        }
+
+        fn new_firehose_block_stream<'life0, 'async_trait>(
+            &'life0 self,
+            deployment: crate::components::store::DeploymentLocator,
+            start_blocks: Vec<crate::components::store::BlockNumber>,
+            firehose_cursor: Option<String>,
+            filter: std::sync::Arc<Self::TriggerFilter>,
+            metrics: std::sync::Arc<super::BlockStreamMetrics>,
+            unified_api_version: crate::data::subgraph::UnifiedMappingApiVersion,
+        ) -> core::pin::Pin<
+            Box<
+                core::future::Future<Output = Result<Box<dyn BlockStream<Self>>, Error>>
+                    + core::marker::Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            todo!()
+        }
+
+        fn new_polling_block_stream<'life0, 'async_trait>(
+            &'life0 self,
+            deployment: crate::components::store::DeploymentLocator,
+            start_blocks: Vec<crate::components::store::BlockNumber>,
+            subgraph_start_block: Option<crate::blockchain::BlockPtr>,
+            filter: std::sync::Arc<Self::TriggerFilter>,
+            metrics: std::sync::Arc<super::BlockStreamMetrics>,
+            unified_api_version: crate::data::subgraph::UnifiedMappingApiVersion,
+        ) -> core::pin::Pin<
+            Box<
+                core::future::Future<Output = Result<Box<dyn BlockStream<Self>>, Error>>
+                    + core::marker::Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            todo!()
+        }
+
+        fn ingestor_adapter(&self) -> std::sync::Arc<Self::IngestorAdapter> {
+            todo!()
+        }
+
+        fn chain_store(&self) -> std::sync::Arc<dyn crate::components::store::ChainStore> {
+            todo!()
+        }
+
+        fn block_pointer_from_number<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            logger: &'life1 slog::Logger,
+            number: crate::components::store::BlockNumber,
+        ) -> core::pin::Pin<
+            Box<
+                core::future::Future<
+                        Output = Result<
+                            crate::blockchain::BlockPtr,
+                            crate::blockchain::IngestorError,
+                        >,
+                    > + core::marker::Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            todo!()
+        }
+
+        fn runtime_adapter(&self) -> std::sync::Arc<Self::RuntimeAdapter> {
+            todo!()
+        }
+
+        fn is_firehose_supported(&self) -> bool {
+            todo!()
+        }
     }
 }

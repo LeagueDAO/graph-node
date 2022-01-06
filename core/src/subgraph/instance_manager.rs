@@ -461,7 +461,7 @@ async fn new_block_stream<C: Blockchain>(
     inputs: Arc<IndexingInputs<C>>,
     filter: C::TriggerFilter,
     block_stream_metrics: Arc<BlockStreamMetrics>,
-) -> Result<Box<dyn BlockStream<BlockWithTriggers<C>>>, Error> {
+) -> Result<Box<dyn BlockStream<C>>, Error> {
     let chain = inputs.chain.clone();
 
     match chain.is_firehose_supported() {

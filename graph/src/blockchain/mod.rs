@@ -6,6 +6,7 @@ pub mod block_ingestor;
 pub mod block_stream;
 pub mod firehose_block_ingestor;
 pub mod firehose_block_stream;
+pub mod mock;
 pub mod polling_block_stream;
 mod types;
 
@@ -118,7 +119,7 @@ pub trait Blockchain: Debug + Sized + Send + Sync + Unpin + 'static {
         filter: Arc<Self::TriggerFilter>,
         metrics: Arc<BlockStreamMetrics>,
         unified_api_version: UnifiedMappingApiVersion,
-    ) -> Result<Box<dyn BlockStream<BlockWithTriggers<Self>>>, Error>;
+    ) -> Result<Box<dyn BlockStream<Self>>, Error>;
 
     async fn new_polling_block_stream(
         &self,
@@ -128,7 +129,7 @@ pub trait Blockchain: Debug + Sized + Send + Sync + Unpin + 'static {
         filter: Arc<Self::TriggerFilter>,
         metrics: Arc<BlockStreamMetrics>,
         unified_api_version: UnifiedMappingApiVersion,
-    ) -> Result<Box<dyn BlockStream<BlockWithTriggers<Self>>>, Error>;
+    ) -> Result<Box<dyn BlockStream<Self>>, Error>;
 
     fn ingestor_adapter(&self) -> Arc<Self::IngestorAdapter>;
 
@@ -267,7 +268,7 @@ pub trait UnresolvedDataSourceTemplate<C: Blockchain>:
     ) -> Result<C::DataSourceTemplate, anyhow::Error>;
 }
 
-pub trait DataSourceTemplate<C: Blockchain>: Send + Sync + Clone + Debug {
+pub trait DataSourceTemplate<C: Blockchain>: Send + Sync + Debug {
     fn api_version(&self) -> semver::Version;
     fn runtime(&self) -> &[u8];
     fn name(&self) -> &str;
