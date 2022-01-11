@@ -5,9 +5,7 @@ RUN apt-get update \
     && apt-get install -y clang libclang-dev
 
 # Clone and build the graph-node repository
-RUN cargo install --path node \
-    && cd .. \
-    && rm -rf graph-node
+RUN cargo install --path node
 
 # Clone and install wait-for-it
 RUN git clone https://github.com/vishnubob/wait-for-it \
@@ -21,15 +19,6 @@ ENV postgres_pass ""
 ENV postgres_db ""
 ENV ipfs ""
 ENV ethereum ""
-
-# HTTP port
-EXPOSE 8000
-
-# WebSocket port
-EXPOSE 8001
-
-# JSON-RPC port
-EXPOSE 8020
 
 # Start everything on startup
 ADD start-node /usr/local/bin
