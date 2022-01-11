@@ -1,4 +1,4 @@
-ROM rust:latest
+FROM rust:latest
 
 # Install clang (required for dependencies)
 RUN apt-get update \
