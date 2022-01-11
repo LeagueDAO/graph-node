@@ -5,6 +5,8 @@ RUN apt-get update \
     && apt-get install -y clang libclang-dev
 
 # Clone and build the graph-node repository
+#fix
+RUN rustup component add rustfmt
 RUN cargo install --path node
 
 # Clone and install wait-for-it
