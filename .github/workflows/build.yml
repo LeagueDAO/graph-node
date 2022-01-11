@@ -26,4 +26,4 @@ jobs:
           echo "${{secrets.nomoSSH}}" > ssh-key-nomo
           sudo chmod 600 ssh-key-nomo
           scp -i ssh-key-nomo -o "StrictHostKeyChecking no" ${name}-${timestamp}.tar ${{secrets.nomoHOST}}:${name}-${timestamp}.tar
-          ssh -i ssh-key-nomo -o "StrictHostKeyChecking no" ${{secrets.nomoHOST}} 'docker load -i '${name}'-'${timestamp}'.tar; docker stop '${name}' || true; docker run -d --restart always -p 3031:5000 --name '${name}'-new '${name}'-'${timestamp}'; docker rm '${name}' || true; docker rmi $(docker images -q) || true; docker rename '${name}'-new '${name}'; rm '${name}'-'${timestamp}'.tar'
+          ssh -i ssh-key-nomo -o "StrictHostKeyChecking no" ${{secrets.nomoHOST}} 'docker load -i '${name}'-'${timestamp}'.tar; docker stop '${name}' || true; docker run -d --restart always -p 3031:8000 -p 3032:8001 -p 3033:8020 --name '${name}'-new '${name}'-'${timestamp}'; docker rm '${name}' || true; docker rmi $(docker images -q) || true; docker rename '${name}'-new '${name}'; rm '${name}'-'${timestamp}'.tar'
