@@ -6,7 +6,7 @@ RUN apt-get update \
 
 # Clone and build the graph-node repository
 #fix
-#RUN rustup component add rustfmt
+RUN rustup component add rustfmt
 RUN cargo build
 
 # Clone and install wait-for-it
