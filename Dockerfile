@@ -1,5 +1,5 @@
 FROM rust:latest
-
+COPY . .
 # Install clang (required for dependencies)
 RUN apt-get update \
     && apt-get install -y clang libclang-dev
