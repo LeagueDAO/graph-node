@@ -1,11 +1,11 @@
-name: main deploy automatically
+name: master deploy automatically
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
     types: [closed]
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
   
 concurrency: LeagueDAO
@@ -15,11 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v2
         with:
-          ref: main
+          ref: master
           
       - name: build docker image
         run: |
-          export name="graph-node-main"
+          export name="graph-node-master"
           export timestamp=$(date +%s)
           docker build . -t ${name}-${timestamp}
           docker save -o ${name}-${timestamp}.tar ${name}-${timestamp}
