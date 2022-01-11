@@ -2,12 +2,12 @@ FROM rust:latest
 COPY . .
 # Install clang (required for dependencies)
 RUN apt-get update \
-    && apt-get install -y clang libclang-dev
+    && apt-get install -y clang libclang-dev libpq-dev libssl-dev pkg-config
 
 # Clone and build the graph-node repository
 #fix
-RUN rustup component add rustfmt
-RUN cargo install --path node
+#RUN rustup component add rustfmt
+RUN cargo build
 
 # Clone and install wait-for-it
 RUN git clone https://github.com/vishnubob/wait-for-it \
