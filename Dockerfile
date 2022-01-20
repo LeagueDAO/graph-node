@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y clang libclang-dev libpq-dev libssl-dev
 RUN rustup component add rustfmt
 RUN cargo build
 
-FROM alpine:latest  
+FROM node
 #deploy locally
 RUN yarn create-local
 RUN yarn deploy-local
