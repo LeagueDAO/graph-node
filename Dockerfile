@@ -9,5 +9,8 @@ RUN apt-get update \
 RUN rustup component add rustfmt
 RUN cargo build
 
+#deploy locally
+RUN yarn create-local
+RUN yarn deploy-local
 # Start everything on startup
 CMD graph-node --debug -V --ethereum-rpc dev:http://localhost:8545 --ipfs localhost:5001 --postgres-url postgresql://nomo:nomo@localhost:5050/nomo
