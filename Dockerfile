@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y clang libclang-dev libpq-dev libssl-dev
 #fix
 RUN rustup component add rustfmt
 RUN cargo build
-cargo run -p graph-node --release --postgres-url postgresql://nomo:nomo@localhost:5050/nomo --ethereum-rpc dev:http://localhost:8545 --ipfs localhost:5001
+RUN cargo run -p graph-node --release --postgres-url postgresql://nomo:nomo@localhost:5050/nomo --ethereum-rpc dev:http://localhost:8545 --ipfs localhost:5001
 
 FROM node
 #deploy locally
