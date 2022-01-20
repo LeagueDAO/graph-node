@@ -11,6 +11,6 @@ RUN cargo build
 
 # Start everything on startup
 CMD cargo run -p graph-node --release -- \
-  --postgres-url postgresql://nomo:nomo@localhost:5432/nomo \
-  --ethereum-rpc dev:http://localhost:8545 \
-  --ipfs localhost:5001
+  --postgres-url postgresql://nomo:nomo@postgres-graf-master:5050/nomo \
+  --ethereum-rpc dev:http://parity-master:8545 \
+  --ipfs ipfs-master:5001
