@@ -1,16 +1,17 @@
-use ethereum::EthereumNetworks;
+use ethereum::{BlockIngestor as EthereumBlockIngestor, EthereumAdapterTrait, EthereumNetworks};
 use git_testament::{git_testament, render_testament};
-use graph::blockchain::block_ingestor::BlockIngestor;
 use graph::blockchain::firehose_block_ingestor::FirehoseBlockIngestor;
 use graph::blockchain::{Block as BlockchainBlock, Blockchain, BlockchainKind, BlockchainMap};
 use graph::components::store::BlockStore;
 use graph::data::graphql::effort::LoadManager;
-use graph::firehose::{FirehoseNetworkEndpoints, FirehoseNetworks};
+use graph::firehose::{FirehoseEndpoints, FirehoseNetworks};
 use graph::log::logger;
 use graph::prelude::{IndexNodeServer as _, JsonRpcServer as _, *};
 use graph::prometheus::Registry;
+use graph::url::Url;
 use graph_chain_ethereum as ethereum;
 use graph_chain_near::{self as near, HeaderOnlyBlock as NearFirehoseHeaderOnlyBlock};
+use graph_chain_tendermint::{self as tendermint, EventList as TendermintFirehoseEventList};
 use graph_core::{
     LinkResolver, MetricsRegistry, SubgraphAssignmentProvider as IpfsSubgraphAssignmentProvider,
     SubgraphInstanceManager, SubgraphRegistrar as IpfsSubgraphRegistrar,
@@ -18,7 +19,7 @@ use graph_core::{
 use graph_graphql::prelude::GraphQlRunner;
 use graph_node::chain::{
     connect_ethereum_networks, connect_firehose_networks, create_ethereum_networks,
-    create_firehose_networks, create_ipfs_clients, ANCESTOR_COUNT, REORG_THRESHOLD,
+    create_firehose_networks, create_ipfs_clients, REORG_THRESHOLD,
 };
 use graph_node::config::Config;
 use graph_node::opt;
@@ -94,6 +95,13 @@ async fn main() {
         graph::env::UNSAFE_CONFIG.store(true, atomic::Ordering::SeqCst);
     }
 
+    if !graph_server_index_node::POI_PROTECTION.is_active() {
+        warn!(
+            logger,
+            "GRAPH_POI_ACCESS_TOKEN not set; might leak POIs to the public via GraphQL"
+        );
+    }
+
     let config = match Config::load(&logger, &opt.clone().into()) {
         Err(e) => {
             eprintln!("configuration error: {}", e);
@@ -129,6 +137,29 @@ async fn main() {
 
     // Obtain metrics server port
     let metrics_port = opt.metrics_port;
+
+    // Obtain the fork base URL
+    let fork_base = match &opt.fork_base {
+        Some(url) => {
+            // Make sure the endpoint ends with a terminating slash.
+            let url = if !url.ends_with("/") {
+                let mut url = url.clone();
+                url.push('/');
+                Url::parse(&url)
+            } else {
+                Url::parse(url)
+            };
+
+            Some(url.expect("Failed to parse the fork base URL"))
+        }
+        None => {
+            warn!(
+                logger,
+                "No fork base URL specified, subgraph forking is disabled"
+            );
+            None
+        }
+    };
 
     info!(logger, "Starting up");
 
@@ -185,8 +216,14 @@ async fn main() {
 
     let expensive_queries = read_expensive_queries().unwrap();
 
-    let store_builder =
-        StoreBuilder::new(&logger, &node_id, &config, metrics_registry.cheap_clone()).await;
+    let store_builder = StoreBuilder::new(
+        &logger,
+        &node_id,
+        &config,
+        fork_base,
+        metrics_registry.cheap_clone(),
+    )
+    .await;
 
     let launch_services = |logger: Logger| async move {
         let subscription_manager = store_builder.subscription_manager();
@@ -200,6 +237,7 @@ async fn main() {
 
         let (eth_networks, ethereum_idents) =
             connect_ethereum_networks(&logger, eth_networks).await;
+
         let (near_networks, near_idents) =
             connect_firehose_networks::<NearFirehoseHeaderOnlyBlock>(
                 &logger,
@@ -209,7 +247,21 @@ async fn main() {
             )
             .await;
 
-        let network_identifiers = ethereum_idents.into_iter().chain(near_idents).collect();
+        let (tendermint_networks, tendermint_idents) =
+            connect_firehose_networks::<TendermintFirehoseEventList>(
+                &logger,
+                firehose_networks_by_kind
+                    .remove(&BlockchainKind::Tendermint)
+                    .unwrap_or_else(|| FirehoseNetworks::new()),
+            )
+            .await;
+
+        let network_identifiers = ethereum_idents
+            .into_iter()
+            .chain(near_idents)
+            .chain(tendermint_idents)
+            .collect();
+
         let network_store = store_builder.network_store(network_identifiers);
 
         let ethereum_chains = ethereum_networks_as_chains(
@@ -228,6 +280,14 @@ async fn main() {
             &mut blockchain_map,
             &logger,
             &near_networks,
+            network_store.as_ref(),
+            &logger_factory,
+        );
+
+        let tendermint_chains = tendermint_networks_as_chains(
+            &mut blockchain_map,
+            &logger,
+            &tendermint_networks,
             network_store.as_ref(),
             &logger_factory,
         );
@@ -260,20 +320,29 @@ async fn main() {
             graphql_runner.clone(),
             network_store.clone(),
             link_resolver.clone(),
-            network_store.subgraph_store().clone(),
         );
 
         if !opt.disable_block_ingestor {
             if ethereum_chains.len() > 0 {
                 let block_polling_interval = Duration::from_millis(opt.ethereum_polling_interval);
 
-                start_block_ingestor(&logger, block_polling_interval, ethereum_chains);
+                start_block_ingestor(
+                    &logger,
+                    &logger_factory,
+                    block_polling_interval,
+                    ethereum_chains,
+                );
             }
 
             start_firehose_block_ingestor::<_, NearFirehoseHeaderOnlyBlock>(
                 &logger,
                 &network_store,
                 near_chains,
+            );
+            start_firehose_block_ingestor::<_, TendermintFirehoseEventList>(
+                &logger,
+                &network_store,
+                tendermint_chains,
             );
 
             // Start a task runner
@@ -286,6 +355,8 @@ async fn main() {
             );
             graph::spawn_blocking(job_runner.start());
         }
+        let static_filters = env::var_os("EXPERIMENTAL_STATIC_FILTERS").is_some();
+        let firehose_filters = env::var_os("FIREHOSE_FILTERS").is_some();
 
         let subgraph_instance_manager = SubgraphInstanceManager::new(
             &logger_factory,
@@ -293,6 +364,8 @@ async fn main() {
             blockchain_map.cheap_clone(),
             metrics_registry.clone(),
             link_resolver.cheap_clone(),
+            static_filters,
+            firehose_filters,
         );
 
         // Create IPFS-based subgraph provider
@@ -355,12 +428,35 @@ async fn main() {
                 .expect("Subgraph name must contain only a-z, A-Z, 0-9, '-' and '_'");
             let subgraph_id =
                 DeploymentHash::new(hash).expect("Subgraph hash must be a valid IPFS hash");
+            let debug_fork = opt
+                .debug_fork
+                .map(DeploymentHash::new)
+                .map(|h| h.expect("Debug fork hash must be a valid IPFS hash"));
+            let start_block = opt
+                .start_block
+                .map(|block| {
+                    let mut split = block.split(":");
+                    (
+                        // BlockHash
+                        split.next().unwrap().to_owned(),
+                        // BlockNumber
+                        split.next().unwrap().parse::<i64>().unwrap(),
+                    )
+                })
+                .map(|(hash, number)| BlockPtr::try_from((hash.as_str(), number)))
+                .map(Result::unwrap);
 
             graph::spawn(
                 async move {
                     subgraph_registrar.create_subgraph(name.clone()).await?;
                     subgraph_registrar
-                        .create_subgraph_version(name, subgraph_id, node_id)
+                        .create_subgraph_version(
+                            name,
+                            subgraph_id,
+                            node_id,
+                            debug_fork,
+                            start_block,
+                        )
                         .await
                 }
                 .map_err(|e| panic!("Failed to deploy subgraph from `--subgraph` flag: {}", e)),
@@ -475,11 +571,9 @@ fn ethereum_networks_as_chains(
                 registry.clone(),
                 chain_store.cheap_clone(),
                 chain_store,
-                store.subgraph_store(),
-                firehose_endpoints.map_or_else(|| FirehoseNetworkEndpoints::new(), |v| v.clone()),
+                firehose_endpoints.map_or_else(|| FirehoseEndpoints::new(), |v| v.clone()),
                 eth_adapters.clone(),
                 chain_head_update_listener.clone(),
-                *ANCESTOR_COUNT,
                 *REORG_THRESHOLD,
                 is_ingestible,
             );
@@ -489,6 +583,54 @@ fn ethereum_networks_as_chains(
 
     for (network_name, chain) in chains.iter().cloned() {
         blockchain_map.insert::<graph_chain_ethereum::Chain>(network_name, chain)
+    }
+
+    HashMap::from_iter(chains)
+}
+
+fn tendermint_networks_as_chains(
+    blockchain_map: &mut BlockchainMap,
+    logger: &Logger,
+    firehose_networks: &FirehoseNetworks,
+    store: &Store,
+    logger_factory: &LoggerFactory,
+) -> HashMap<String, FirehoseChain<tendermint::Chain>> {
+    let chains: Vec<_> = firehose_networks
+        .networks
+        .iter()
+        .filter_map(|(network_name, firehose_endpoints)| {
+            store
+                .block_store()
+                .chain_store(network_name)
+                .map(|chain_store| (network_name, chain_store, firehose_endpoints))
+                .or_else(|| {
+                    error!(
+                        logger,
+                        "No store configured for Tendermint chain {}; ignoring this chain",
+                        network_name
+                    );
+                    None
+                })
+        })
+        .map(|(network_name, chain_store, firehose_endpoints)| {
+            (
+                network_name.clone(),
+                FirehoseChain {
+                    chain: Arc::new(tendermint::Chain::new(
+                        logger_factory.clone(),
+                        network_name.clone(),
+                        chain_store,
+                        firehose_endpoints.clone(),
+                    )),
+                    firehose_endpoints: firehose_endpoints.clone(),
+                },
+            )
+        })
+        .collect();
+
+    for (network_name, firehose_chain) in chains.iter() {
+        blockchain_map
+            .insert::<tendermint::Chain>(network_name.clone(), firehose_chain.chain.clone())
     }
 
     HashMap::from_iter(chains)
@@ -505,38 +647,38 @@ fn near_networks_as_chains(
     let chains: Vec<_> = firehose_networks
         .networks
         .iter()
-        .filter_map(|(network_name, firehose_endpoints)| {
+        .filter_map(|(chain_id, endpoints)| {
             store
                 .block_store()
-                .chain_store(network_name)
-                .map(|chain_store| (network_name, chain_store, firehose_endpoints))
+                .chain_store(chain_id)
+                .map(|chain_store| (chain_id, chain_store, endpoints))
                 .or_else(|| {
                     error!(
                         logger,
-                        "No store configured for NEAR chain {}; ignoring this chain", network_name
+                        "No store configured for NEAR chain {}; ignoring this chain", chain_id
                     );
                     None
                 })
         })
-        .map(|(network_name, chain_store, firehose_endpoints)| {
+        .map(|(chain_id, chain_store, endpoints)| {
             (
-                network_name.clone(),
+                chain_id.clone(),
                 FirehoseChain {
                     chain: Arc::new(near::Chain::new(
                         logger_factory.clone(),
-                        network_name.clone(),
+                        chain_id.clone(),
                         chain_store,
-                        firehose_endpoints.clone(),
+                        endpoints.clone(),
                     )),
-                    firehose_endpoints: firehose_endpoints.clone(),
+                    firehose_endpoints: endpoints.clone(),
                 },
             )
         })
         .collect();
 
-    for (network_name, firehose_chain) in chains.iter() {
+    for (chain_id, firehose_chain) in chains.iter() {
         blockchain_map
-            .insert::<graph_chain_near::Chain>(network_name.clone(), firehose_chain.chain.clone())
+            .insert::<graph_chain_near::Chain>(chain_id.clone(), firehose_chain.chain.clone())
     }
 
     HashMap::from_iter(chains)
@@ -544,15 +686,10 @@ fn near_networks_as_chains(
 
 fn start_block_ingestor(
     logger: &Logger,
+    logger_factory: &LoggerFactory,
     block_polling_interval: Duration,
     chains: HashMap<String, Arc<ethereum::Chain>>,
 ) {
-    // BlockIngestor must be configured to keep at least REORG_THRESHOLD ancestors,
-    // otherwise BlockStream will not work properly.
-    // BlockStream expects the blocks after the reorg threshold to be present in the
-    // database.
-    assert!(*ANCESTOR_COUNT >= *REORG_THRESHOLD);
-
     info!(
         logger,
         "Starting block ingestors with {} chains [{}]",
@@ -580,8 +717,26 @@ fn start_block_ingestor(
                 "network_name" => &network_name
             );
 
-            let block_ingestor = BlockIngestor::<ethereum::Chain>::new(
-                chain.ingestor_adapter(),
+            let eth_adapter = chain.cheapest_adapter();
+                let logger = logger_factory
+                    .component_logger(
+                        "BlockIngestor",
+                        Some(ComponentLoggerConfig {
+                            elastic: Some(ElasticComponentLoggerConfig {
+                                index: String::from("block-ingestor-logs"),
+                            }),
+                        }),
+                    )
+                    .new(o!("provider" => eth_adapter.provider().to_string()));
+
+            // The block ingestor must be configured to keep at least REORG_THRESHOLD ancestors,
+            // because the json-rpc BlockStream expects blocks after the reorg threshold to be
+            // present in the DB.
+            let block_ingestor = EthereumBlockIngestor::new(
+                logger,
+                *REORG_THRESHOLD,
+                eth_adapter,
+                chain.chain_store(),
                 block_polling_interval,
             )
             .expect("failed to create Ethereum block ingestor");
@@ -594,7 +749,7 @@ fn start_block_ingestor(
 #[derive(Clone)]
 struct FirehoseChain<C: Blockchain> {
     chain: Arc<C>,
-    firehose_endpoints: FirehoseNetworkEndpoints,
+    firehose_endpoints: FirehoseEndpoints,
 }
 
 fn start_firehose_block_ingestor<C, M>(

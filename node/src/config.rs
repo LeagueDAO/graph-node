@@ -1,6 +1,6 @@
 use graph::{
     anyhow::Error,
-    blockchain::{block_ingestor::CLEANUP_BLOCKS, BlockchainKind},
+    blockchain::BlockchainKind,
     prelude::{
         anyhow::{anyhow, bail, Context, Result},
         info,
@@ -11,7 +11,7 @@ use graph::{
         serde_json, Logger, NodeId, StoreError,
     },
 };
-use graph_chain_ethereum::NodeCapabilities;
+use graph_chain_ethereum::{NodeCapabilities, CLEANUP_BLOCKS};
 use graph_store_postgres::{DeploymentPlacer, Shard as ShardName, PRIMARY_SHARD};
 
 use http::{HeaderMap, Uri};
@@ -325,7 +325,7 @@ impl PoolSize {
                 .map(|rule| rule.size)
                 .ok_or_else(|| {
                     anyhow!(
-                        "no rule matches `{}` for the pool of shard {}",
+                        "no rule matches node id `{}` for the pool of shard {}",
                         node.as_str(),
                         name
                     )

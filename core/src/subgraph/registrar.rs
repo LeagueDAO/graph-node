@@ -6,7 +6,7 @@ use graph::blockchain::Blockchain;
 use graph::blockchain::BlockchainKind;
 use graph::blockchain::BlockchainMap;
 use graph::components::store::{DeploymentId, DeploymentLocator, SubscriptionManager};
-use graph::data::subgraph::schema::SubgraphDeploymentEntity;
+use graph::data::subgraph::schema::DeploymentCreate;
 use graph::data::subgraph::MAX_SPEC_VERSION;
 use graph::prelude::{
     CreateSubgraphResult, SubgraphAssignmentProvider as SubgraphAssignmentProviderTrait,
@@ -266,6 +266,8 @@ where
         name: SubgraphName,
         hash: DeploymentHash,
         node_id: NodeId,
+        debug_fork: Option<DeploymentHash>,
+        start_block: Option<BlockPtr>,
     ) -> Result<(), SubgraphRegistrarError> {
         // We don't have a location for the subgraph yet; that will be
         // assigned when we deploy for real. For logging purposes, make up a
@@ -301,8 +303,10 @@ where
                     self.chains.cheap_clone(),
                     name.clone(),
                     hash.cheap_clone(),
+                    start_block,
                     raw,
                     node_id,
+                    debug_fork,
                     self.version_switching_mode,
                     self.resolver.cheap_clone(),
                 )
@@ -316,8 +320,27 @@ where
                     self.chains.cheap_clone(),
                     name.clone(),
                     hash.cheap_clone(),
+                    start_block,
                     raw,
                     node_id,
+                    debug_fork,
+                    self.version_switching_mode,
+                    self.resolver.cheap_clone(),
+                )
+                .await?
+            }
+
+            BlockchainKind::Tendermint => {
+                create_subgraph_version::<graph_chain_tendermint::Chain, _, _>(
+                    &logger,
+                    self.store.clone(),
+                    self.chains.cheap_clone(),
+                    name.clone(),
+                    hash.cheap_clone(),
+                    start_block,
+                    raw,
+                    node_id,
+                    debug_fork,
                     self.version_switching_mode,
                     self.resolver.cheap_clone(),
                 )
@@ -409,7 +432,7 @@ async fn start_subgraph(
     trace!(logger, "Start subgraph");
 
     let start_time = Instant::now();
-    let result = provider.start(deployment.clone()).await;
+    let result = provider.start(deployment.clone(), None).await;
 
     debug!(
         logger,
@@ -491,8 +514,10 @@ async fn create_subgraph_version<C: Blockchain, S: SubgraphStore, L: LinkResolve
     chains: Arc<BlockchainMap>,
     name: SubgraphName,
     deployment: DeploymentHash,
+    start_block_ptr: Option<BlockPtr>,
     raw: serde_yaml::Mapping,
     node_id: NodeId,
+    debug_fork: Option<DeploymentHash>,
     version_switching_mode: SubgraphVersionSwitchingMode,
     resolver: Arc<L>,
 ) -> Result<(), SubgraphRegistrarError> {
@@ -508,6 +533,7 @@ async fn create_subgraph_version<C: Blockchain, S: SubgraphStore, L: LinkResolve
 
     let manifest = unvalidated
         .validate(store.cheap_clone(), true)
+        .await
         .map_err(SubgraphRegistrarError::ManifestValidationError)?;
 
     let network_name = manifest.network_name();
@@ -530,8 +556,13 @@ async fn create_subgraph_version<C: Blockchain, S: SubgraphStore, L: LinkResolve
         return Err(SubgraphRegistrarError::NameNotFound(name.to_string()));
     }
 
-    let (start_block, base_block) =
+    let (manifest_start_block, base_block) =
         resolve_subgraph_chain_blocks(&manifest, chain, &logger.clone()).await?;
+
+    let start_block = match start_block_ptr {
+        Some(block) => Some(block),
+        None => manifest_start_block,
+    };
 
     info!(
         logger,
@@ -548,7 +579,9 @@ async fn create_subgraph_version<C: Blockchain, S: SubgraphStore, L: LinkResolve
 
     // Apply the subgraph versioning and deployment operations,
     // creating a new subgraph deployment if one doesn't exist.
-    let deployment = SubgraphDeploymentEntity::new(&manifest, false, start_block).graft(base_block);
+    let deployment = DeploymentCreate::new(&manifest, start_block)
+        .graft(base_block)
+        .debug(debug_fork);
     deployment_store
         .create_subgraph_deployment(
             name,

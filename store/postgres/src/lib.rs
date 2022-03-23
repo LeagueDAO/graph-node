@@ -35,6 +35,7 @@ mod deployment;
 mod deployment_store;
 mod detail;
 mod dynds;
+mod fork;
 mod functions;
 mod jobs;
 mod jsonb;
@@ -48,6 +49,7 @@ mod store;
 mod store_events;
 mod subgraph_store;
 pub mod transaction_receipt;
+mod writable;
 
 #[cfg(debug_assertions)]
 pub mod layout_for_tests {

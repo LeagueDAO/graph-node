@@ -10,6 +10,7 @@ use graph::ipfs_client::IpfsClient;
 use graph::prelude::{anyhow, tokio, BlockNumber};
 use graph::prelude::{prost, MetricsRegistry as MetricsRegistryTrait};
 use graph::slog::{debug, error, info, o, Logger};
+use graph::url::Url;
 use graph::util::security::SafeDisplay;
 use graph_chain_ethereum::{self as ethereum, EthereumAdapterTrait, Transport};
 use graph_core::MetricsRegistry;
@@ -24,11 +25,11 @@ use std::time::Duration;
 #[derive(PartialEq)]
 enum ProviderNetworkStatus {
     Broken {
-        network: String,
+        chain_id: String,
         provider: String,
     },
     Version {
-        network: String,
+        chain_id: String,
         ident: ChainIdentifier,
     },
 }
@@ -44,14 +45,7 @@ lazy_static! {
         .ok()
         .map(|s| BlockNumber::from_str(&s)
             .unwrap_or_else(|_| panic!("failed to parse env var ETHEREUM_REORG_THRESHOLD")))
-        .unwrap_or(50);
-
-    // Default to an ancestor count of 50 blocks
-    pub static ref ANCESTOR_COUNT: BlockNumber = env::var("ETHEREUM_ANCESTOR_COUNT")
-        .ok()
-        .map(|s| BlockNumber::from_str(&s)
-             .unwrap_or_else(|_| panic!("failed to parse env var ETHEREUM_ANCESTOR_COUNT")))
-        .unwrap_or(50);
+        .unwrap_or(250);
 }
 
 pub fn create_ipfs_clients(logger: &Logger, ipfs_addresses: &Vec<String>) -> Vec<IpfsClient> {
@@ -149,7 +143,7 @@ pub async fn create_ethereum_networks(
                 use crate::config::Transport::*;
 
                 let transport = match web3.transport {
-                    Rpc => Transport::new_rpc(&web3.url, web3.headers.clone()),
+                    Rpc => Transport::new_rpc(Url::parse(&web3.url)?, web3.headers.clone()),
                     Ipc => Transport::new_ipc(&web3.url).await,
                     Ws => Transport::new_ws(&web3.url).await,
                 };
@@ -258,7 +252,7 @@ pub async fn connect_ethereum_networks(
                         error!(logger, "Connection to provider failed. Not using this provider";
                                        "error" =>  e.to_string());
                         ProviderNetworkStatus::Broken {
-                            network,
+                            chain_id: network,
                             provider: eth_adapter.provider().to_string(),
                         }
                     }
@@ -269,7 +263,10 @@ pub async fn connect_ethereum_networks(
                             "network_version" => &ident.net_version,
                             "capabilities" => &capabilities
                         );
-                        ProviderNetworkStatus::Version { network, ident }
+                        ProviderNetworkStatus::Version {
+                            chain_id: network,
+                            ident,
+                        }
                     }
                 }
             }),
@@ -282,12 +279,14 @@ pub async fn connect_ethereum_networks(
             .into_iter()
             .fold(HashMap::new(), |mut networks, status| {
                 match status {
-                    ProviderNetworkStatus::Broken { network, provider } => {
-                        eth_networks.remove(&network, &provider)
-                    }
-                    ProviderNetworkStatus::Version { network, ident } => {
-                        networks.entry(network.to_string()).or_default().push(ident)
-                    }
+                    ProviderNetworkStatus::Broken {
+                        chain_id: network,
+                        provider,
+                    } => eth_networks.remove(&network, &provider),
+                    ProviderNetworkStatus::Version {
+                        chain_id: network,
+                        ident,
+                    } => networks.entry(network.to_string()).or_default().push(ident),
                 }
                 networks
             });
@@ -316,11 +315,11 @@ where
         firehose_networks
             .flatten()
             .into_iter()
-            .map(|(network_name, endpoint)| (network_name, endpoint, logger.clone()))
-            .map(|(network, endpoint, logger)| async move {
+            .map(|(chain_id, endpoint)| (chain_id, endpoint, logger.clone()))
+            .map(|(chain_id, endpoint, logger)| async move {
                 let logger = logger.new(o!("provider" => endpoint.provider.to_string()));
                 info!(
-                    logger, "Connecting to Firehose to get network identifier";
+                    logger, "Connecting to Firehose to get chain identifier";
                     "url" => &endpoint.uri,
                 );
                 match tokio::time::timeout(
@@ -334,9 +333,9 @@ where
                     // on the URL)
                     Ok(Err(e)) | Err(e) => {
                         error!(logger, "Connection to provider failed. Not using this provider";
-                                       "error" =>  e.to_string());
+                                       "error" =>  format!("{:#}", e));
                         ProviderNetworkStatus::Broken {
-                            network,
+                            chain_id,
                             provider: endpoint.provider.to_string(),
                         }
                     }
@@ -353,28 +352,42 @@ where
                             genesis_block_hash: ptr.hash,
                         };
 
-                        ProviderNetworkStatus::Version { network, ident }
+                        ProviderNetworkStatus::Version { chain_id, ident }
                     }
                 }
             }),
     )
     .await;
 
-    // Group identifiers by network name
+    // Group identifiers by chain id
     let idents: HashMap<String, Vec<ChainIdentifier>> =
         statuses
             .into_iter()
             .fold(HashMap::new(), |mut networks, status| {
                 match status {
-                    ProviderNetworkStatus::Broken { network, provider } => {
-                        firehose_networks.remove(&network, &provider)
+                    ProviderNetworkStatus::Broken { chain_id, provider } => {
+                        firehose_networks.remove(&chain_id, &provider)
                     }
-                    ProviderNetworkStatus::Version { network, ident } => {
-                        networks.entry(network.to_string()).or_default().push(ident)
-                    }
+                    ProviderNetworkStatus::Version { chain_id, ident } => networks
+                        .entry(chain_id.to_string())
+                        .or_default()
+                        .push(ident),
                 }
                 networks
             });
+
+    // Clean-up chains with 0 provider
+    firehose_networks.networks.retain(|chain_id, endpoints| {
+        if endpoints.len() == 0 {
+            error!(
+                logger,
+                "No non-broken providers available for chain {}; ignoring this chain", chain_id
+            );
+        }
+
+        endpoints.len() > 0
+    });
+
     let idents: Vec<_> = idents.into_iter().collect();
     (firehose_networks, idents)
 }
