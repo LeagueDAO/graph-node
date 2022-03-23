@@ -23,4 +23,4 @@ jobs:
           echo "${{secrets.nomoSSH}}" > ssh-key-nomo
           sudo chmod 600 ssh-key-nomo
           scp -i ssh-key-nomo -o "StrictHostKeyChecking no" ./docker/docker-compose.yml ${{secrets.nomoHOST}}:graph-node/docker-compose.yml
-          ssh -i ssh-key-nomo -o "StrictHostKeyChecking no" ${{secrets.nomoHOST}} 'docker-compose down; docker-compose up -d'
+          ssh -i ssh-key-nomo -o "StrictHostKeyChecking no" ${{secrets.nomoHOST}} 'cd graph-node; docker-compose down; docker-compose up -d'
