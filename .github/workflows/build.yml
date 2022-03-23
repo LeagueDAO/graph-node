@@ -1,0 +1,26 @@
+name: master deploy automatically
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    types: [closed]
+    branches: [master]
+  workflow_dispatch:
+  
+concurrency: LeagueDAO
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          ref: master
+          
+      - name: deploy compose
+        run: |
+          export timestamp=$(date +%s)
+          echo "${{secrets.nomoSSH}}" > ssh-key-nomo
+          sudo chmod 600 ssh-key-nomo
+          scp -i ssh-key-nomo -o "StrictHostKeyChecking no" ./docker/docker-compose.yml ${{secrets.nomoHOST}}:graph-node/docker-compose.yml
+          ssh -i ssh-key-nomo -o "StrictHostKeyChecking no" ${{secrets.nomoHOST}} 'docker-compose down; docker-compose up -d'
